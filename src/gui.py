@@ -1,234 +1,27 @@
+"""GUI implementation for the blackjack simulator."""
+
 import tkinter as tk
 from tkinter import ttk
 import numpy as np
-import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
-
-# Game constants
-WIN_PROBABILITY = 0.49
-LOSS_PROBABILITY = 0.42
-TIE_PROBABILITY = 0.09
-EXPECTED_VALUE_PER_DOLLAR = -0.07  # average loss per dollar bet (with these odds)
-
-
-class BettingStrategy:
-    """Base class for betting strategies."""
-    def get_bet_amount(self, base_bet, current_streak, total_profit, hand_number, max_bet):
-        raise NotImplementedError
-    
-    def get_name(self):
-        raise NotImplementedError
-
-
-class FlatBetting(BettingStrategy):
-    """Bet the same amount every hand."""
-    def get_bet_amount(self, base_bet, current_streak, total_profit, hand_number, max_bet):
-        # cap the flat bet just in case user set max lower than base
-        return min(base_bet, max_bet)
-    
-    def get_name(self):
-        return "Flat Betting"
-
-
-class Martingale(BettingStrategy):
-    """Double bet after each loss, reset to base after win."""
-    def get_bet_amount(self, base_bet, current_streak, total_profit, hand_number, max_bet):
-        if current_streak >= 0:
-            # positive or zero streak means we won last hand or just started, go back to base
-            return min(base_bet, max_bet)
-        # negative streak length = how many losses in a row, classic martingale
-        bet = base_bet * (2 ** abs(current_streak))
-        return min(bet, max_bet)
-    
-    def get_name(self):
-        return "Martingale"
-
-
-class Fibonacci(BettingStrategy):
-    """Follow Fibonacci sequence after losses."""
-    def __init__(self):
-        # precomputed so we do not keep growing the list mid sim
-        self.fib_sequence = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610]
-    
-    def get_bet_amount(self, base_bet, current_streak, total_profit, hand_number, max_bet):
-        if current_streak >= 0:
-            # on a win or fresh start we reset the ladder
-            return min(base_bet, max_bet)
-        loss_count = abs(current_streak)
-        # do not run off the end if we lose more than we planned for
-        fib_index = min(loss_count, len(self.fib_sequence) - 1)
-        return min(base_bet * self.fib_sequence[fib_index], max_bet)
-    
-    def get_name(self):
-        return "Fibonacci"
-
-
-class Paroli(BettingStrategy):
-    """Double bet after each win for up to 3 wins, then reset."""
-    def __init__(self, max_progression=3):
-        # how many steps we are willing to press the win
-        self.max_progression = max_progression
-    
-    def get_bet_amount(self, base_bet, current_streak, total_profit, hand_number, max_bet):
-        if current_streak <= 0:
-            # lost or neutral, start the press over
-            return min(base_bet, max_bet)
-        # only press up to the cap so one heater does not go crazy
-        progression = min(current_streak, self.max_progression)
-        return min(base_bet * (2 ** progression), max_bet)
-    
-    def get_name(self):
-        return "Paroli"
-
-
-class Progressive(BettingStrategy):
-    """Increase bet by 1 unit after win, decrease by 1 after loss."""
-    def get_bet_amount(self, base_bet, current_streak, total_profit, hand_number, max_bet):
-        if current_streak > 0:
-            # n wins in a row bumps the bet by 0.5 base per win
-            bet = base_bet + (current_streak * base_bet * 0.5)
-        elif current_streak < 0:
-            # on losses we step down but do not go below half base
-            bet = max(base_bet * 0.5, base_bet + (current_streak * base_bet * 0.5))
-        else:
-            bet = base_bet
-        return min(bet, max_bet)
-    
-    def get_name(self):
-        return "Progressive"
-
-
-class BlackjackSimulator:
-    """Simulates multiple hands of blackjack and tracks statistics."""
-    
-    def __init__(self, num_hands, base_bet, max_bet, strategy):
-        self.num_hands = num_hands
-        self.base_bet = base_bet
-        self.max_bet = max_bet
-        self.strategy = strategy
-        
-        # running totals and history so we can plot and compute stats later
-        self.total_profit = 0
-        self.hand_results = []          # -1 loss, 0 tie, 1 win
-        self.profit_history = []        # bankroll over time
-        self.bet_history = []           # actual dollars risked each hand
-        self.expected_value_history = []  # model EV line using actual bet sizes
-        
-        # streak and extrema tracking for the dashboard
-        self.longest_win_streak = 0
-        self.current_win_streak = 0
-        self.longest_loss_streak = 0    # store as negative for convenience
-        self.current_loss_streak = 0
-        self.highest_profit = 0         # best point hit
-        self.lowest_profit = 0          # worst drawdown
-        
-        self.current_hand = 0
-        self.is_running = False
-    
-    def play_hand(self):
-        """Simulates a single hand of blackjack using numpy."""
-        # super simple outcome model, not real rules
-        outcome = np.random.random()
-        
-        if outcome <= WIN_PROBABILITY:
-            return -1  # Loss  - probabilities are inverted to make EV negative on average
-        elif outcome <= WIN_PROBABILITY + LOSS_PROBABILITY:
-            return 1   # Win
-        else:
-            return 0   # Tie
-    
-    def update_statistics(self, result, bet_amount):
-        """Updates running statistics based on hand result."""
-        # profit update and streak bookkeeping
-        if result == -1:  # Loss
-            self.total_profit -= bet_amount
-            self.current_win_streak = 0
-            self.current_loss_streak -= 1
-        elif result == 1:  # Win
-            self.total_profit += bet_amount
-            self.current_win_streak += 1
-            self.current_loss_streak = 0
-        # ties keep streaks as is
-        
-        # time series for the plot and later metrics
-        self.hand_results.append(result)
-        self.profit_history.append(self.total_profit)
-        self.bet_history.append(bet_amount)
-
-        # expected value line accumulates using the same bet sizing used by the strategy
-        if len(self.expected_value_history) == 0:
-            cumulative_ev = EXPECTED_VALUE_PER_DOLLAR * bet_amount
-        else:
-            cumulative_ev = self.expected_value_history[-1] + (EXPECTED_VALUE_PER_DOLLAR * bet_amount)
-        self.expected_value_history.append(cumulative_ev)
-
-        # highs and lows so we can show peaks and drawdowns
-        if self.total_profit > self.highest_profit:
-            self.highest_profit = self.total_profit
-        
-        if self.total_profit < self.lowest_profit:
-            self.lowest_profit = self.total_profit
-        
-        if self.current_win_streak > self.longest_win_streak:
-            self.longest_win_streak = self.current_win_streak
-        
-        if self.current_loss_streak < self.longest_loss_streak:
-            self.longest_loss_streak = self.current_loss_streak
-    
-    def run_single_hand(self):
-        """Runs a single hand and returns if simulation should continue."""
-        if self.current_hand >= self.num_hands:
-            return False
-        
-        # pass a signed streak value to strategies so they know win vs loss momentum
-        result = self.play_hand()
-        bet_amount = self.strategy.get_bet_amount(
-            self.base_bet, 
-            self.current_win_streak if self.current_win_streak > 0 else self.current_loss_streak,
-            self.total_profit,
-            self.current_hand,
-            self.max_bet
-        )
-        self.update_statistics(result, bet_amount)
-        self.current_hand += 1
-        
-        return True
-    
-    def run_all_hands(self):
-        """Runs all hands instantly without animation."""
-        # faster path when you do not need to watch it happen
-        while self.current_hand < self.num_hands:
-            self.run_single_hand()
-    
-    def get_statistics(self):
-        """Calculates and returns game statistics."""
-        wins = self.hand_results.count(1)
-        losses = self.hand_results.count(-1)
-        ties = self.hand_results.count(0)
-        total_hands = len(self.hand_results)
-        
-        if total_hands == 0:
-            return None
-        
-        # bundle everything the UI needs so it does not recompute
-        return {
-            'wins': wins,
-            'losses': losses,
-            'ties': ties,
-            'win_percentage': (wins / total_hands) * 100,
-            'loss_percentage': (losses / total_hands) * 100,
-            'tie_percentage': (ties / total_hands) * 100,
-            'longest_win_streak': self.longest_win_streak,
-            'longest_loss_streak': abs(self.longest_loss_streak),
-            'highest_profit': self.highest_profit,
-            'lowest_profit': self.lowest_profit,
-            'final_profit': self.total_profit,
-            'total_bet': sum(self.bet_history),
-            'avg_bet': np.mean(self.bet_history) if self.bet_history else 0,
-            'max_bet_used': max(self.bet_history) if self.bet_history else 0
-        }
+from constants import (
+    DEFAULT_NUM_HANDS, 
+    DEFAULT_BASE_BET, 
+    DEFAULT_MAX_BET,
+    DEFAULT_ANIMATION_SPEED,
+    WINDOW_WIDTH,
+    WINDOW_HEIGHT
+)
+from strategies import (
+    FlatBetting, 
+    Martingale, 
+    Fibonacci, 
+    Paroli, 
+    Progressive
+)
+from simulator import BlackjackSimulator
 
 
 class BlackjackGUI:
@@ -236,12 +29,12 @@ class BlackjackGUI:
     
     def __init__(self, root):
         self.root = root
-        self.root.title("Blackjack Simulator Pro")
-        self.root.geometry("1500x900")
+        self.root.title("Blackjack Simulator")
+        self.root.geometry(f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}")
         
         self.simulator = None
         self.is_running = False
-        self.update_speed = 10  # smaller means faster animation
+        self.update_speed = DEFAULT_ANIMATION_SPEED
         
         # easy mapping from dropdown to concrete strategy objects
         self.strategies = {
@@ -270,15 +63,15 @@ class BlackjackGUI:
         
         # Input fields with better styling
         ttk.Label(control_frame, text="Number of Hands:", font=('Arial', 10)).grid(row=0, column=0, sticky=tk.W, pady=8)
-        self.hands_var = tk.StringVar(value="1000")
+        self.hands_var = tk.StringVar(value=str(DEFAULT_NUM_HANDS))
         ttk.Entry(control_frame, textvariable=self.hands_var, width=18, font=('Arial', 10)).grid(row=0, column=1, pady=8, padx=5)
         
         ttk.Label(control_frame, text="Base Bet ($):", font=('Arial', 10)).grid(row=1, column=0, sticky=tk.W, pady=8)
-        self.bet_var = tk.StringVar(value="10")
+        self.bet_var = tk.StringVar(value=str(DEFAULT_BASE_BET))
         ttk.Entry(control_frame, textvariable=self.bet_var, width=18, font=('Arial', 10)).grid(row=1, column=1, pady=8, padx=5)
         
         ttk.Label(control_frame, text="Max Bet ($):", font=('Arial', 10)).grid(row=2, column=0, sticky=tk.W, pady=8)
-        self.max_bet_var = tk.StringVar(value="1000")
+        self.max_bet_var = tk.StringVar(value=str(DEFAULT_MAX_BET))
         ttk.Entry(control_frame, textvariable=self.max_bet_var, width=18, font=('Arial', 10)).grid(row=2, column=1, pady=8, padx=5)
         
         ttk.Label(control_frame, text="Betting Strategy:", font=('Arial', 10)).grid(row=3, column=0, sticky=tk.W, pady=8)
@@ -292,7 +85,7 @@ class BlackjackGUI:
         ttk.Checkbutton(control_frame, text="Animate (slower)", variable=self.animate_var).grid(row=4, column=0, columnspan=2, pady=5)
         
         ttk.Label(control_frame, text="Animation Speed (ms):", font=('Arial', 10)).grid(row=5, column=0, sticky=tk.W, pady=8)
-        self.speed_var = tk.StringVar(value="10")
+        self.speed_var = tk.StringVar(value=str(DEFAULT_ANIMATION_SPEED))
         ttk.Entry(control_frame, textvariable=self.speed_var, width=18, font=('Arial', 10)).grid(row=5, column=1, pady=8, padx=5)
         
         # Buttons
@@ -604,14 +397,3 @@ class BlackjackGUI:
         self.stats_text.insert(tk.END, "ROI: ",'neutral')
         roi_tag = 'profit' if roi >= 0 else 'loss'
         self.stats_text.insert(tk.END, f"{roi:.2f}%\n", roi_tag)
-
-
-def main():
-    """Main function to run the GUI."""
-    root = tk.Tk()
-    app = BlackjackGUI(root)
-    root.mainloop()
-
-
-if __name__ == "__main__":
-    main()
